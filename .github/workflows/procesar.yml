@@ -1,1 +1,53 @@
+name: Procesar Contenedores
 
+on:
+  schedule:
+    # Ejecutar cada 4 horas (puedes cambiar el intervalo)
+    # Formato: minuto hora día mes día_semana
+    - cron: "0 */4 * * *"
+
+  # Permite ejecutar manualmente desde GitHub si necesitas
+  workflow_dispatch:
+
+jobs:
+  procesar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      # Restaurar el archivo de fotos ya procesadas (persistencia entre ejecuciones)
+      - name: Restaurar processed.json
+        uses: actions/cache@v4
+        with:
+          path: processed.json
+          key: processed-json-${{ github.run_id }}
+          restore-keys: |
+            processed-json-
+
+      - name: Ejecutar procesamiento
+        env:
+          ANTHROPIC_KEY:  ${{ secrets.ANTHROPIC_KEY }}
+          MS_CLIENT_ID:   ${{ secrets.MS_CLIENT_ID }}
+          MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
+          MS_TENANT_ID:   ${{ secrets.MS_TENANT_ID }}
+          CARPETA_FOTOS:  ${{ secrets.CARPETA_FOTOS }}
+          EXCEL_PATH:     ${{ secrets.EXCEL_PATH }}
+        run: python procesar.py
+
+      # Guardar processed.json actualizado para la próxima ejecución
+      - name: Guardar processed.json
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: processed.json
+          key: processed-json-${{ github.run_id }}
