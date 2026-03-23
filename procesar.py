@@ -244,7 +244,7 @@ def main():
 
         try:
             image_bytes = descargar_foto(foto["url"])
-            image_b64   = imagen_a_base64(image_bytes)
+            img  = preparar_imagen(image_bytes)
 
             # Etapa 1: filtro
             if not es_puerta_contenedor(image_b64):
