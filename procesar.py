@@ -1,38 +1,55 @@
 """
-Procesador de contenedores (VERSIÓN PRUEBA GITHUB)
+Procesador de contenedores -> Google Sheets
 - Lee fotos desde la carpeta local 'Fotos'
 - Filtra y extrae datos con Gemini 2.5 Flash
-- Actualiza un Excel local 'reporte.xlsx'
+- Escribe directamente en Google Sheets
 """
 
 import google.generativeai as genai
+import gspread
+from google.oauth2.service_account import Credentials
 import io
 import json
 import os
 from datetime import datetime
 from PIL import Image
-import openpyxl
 
 # -------------------------------------------------------
 # CONFIGURACIÓN
 # -------------------------------------------------------
-GEMINI_KEY     = os.environ["GEMINI_KEY"]
-CARPETA_FOTOS  = "Fotos"
-EXCEL_PATH     = "reporte.xlsx"
-PROCESSED_FILE = "processed.json"
+GEMINI_KEY      = os.environ["GEMINI_KEY"]
+GCP_CREDENTIALS = os.environ["GCP_CREDENTIALS"]
+
+CARPETA_FOTOS   = "Fotos"
+PROCESSED_FILE  = "processed.json"
+
+# Datos de tu Google Sheet
+SHEET_ID   = "1USS1t54xXnVnuJIUSmiU4U1TE55QcybyOedYyDvFfNA"
+SHEET_NAME = "Sheet1"
 
 genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 # -------------------------------------------------------
-# OPERACIONES LOCALES
+# CONEXIÓN A GOOGLE SHEETS
 # -------------------------------------------------------
+def conectar_sheets():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds_dict = json.loads(GCP_CREDENTIALS)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    cliente = gspread.authorize(creds)
+    return cliente.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
+# -------------------------------------------------------
+# OPERACIONES LOCALES (Lectura de fotos)
+# -------------------------------------------------------
 def listar_fotos_locales() -> list[dict]:
     if not os.path.exists(CARPETA_FOTOS):
-        os.makedirs(CARPETA_FOTOS) # Crea la carpeta si no existe
+        os.makedirs(CARPETA_FOTOS)
         return []
-        
     extensiones = {".jpg", ".jpeg", ".png", ".webp"}
     return [
         {"nombre": f, "ruta": os.path.join(CARPETA_FOTOS, f)}
@@ -53,7 +70,6 @@ def guardar_procesadas(procesadas: set):
 # -------------------------------------------------------
 # UTILIDADES DE IMAGEN Y JSON
 # -------------------------------------------------------
-
 def preparar_imagen(ruta_imagen: str) -> Image.Image:
     with open(ruta_imagen, "rb") as f:
         img = Image.open(io.BytesIO(f.read()))
@@ -77,7 +93,6 @@ def limpiar_json(texto: str):
 # -------------------------------------------------------
 # PIPELINE IA
 # -------------------------------------------------------
-
 def es_puerta_contenedor(img: Image.Image) -> bool:
     prompt = "Is this a photo of a shipping container door showing the container code/number? Answer only YES or NO."
     response = model.generate_content([prompt, img])
@@ -91,38 +106,10 @@ Si no es legible pon null. Solo el JSON, sin explicaciones."""
     return limpiar_json(response.text)
 
 # -------------------------------------------------------
-# ACTUALIZAR EXCEL LOCAL
-# -------------------------------------------------------
-
-def actualizar_excel_local(filas: list[dict]):
-    if os.path.exists(EXCEL_PATH):
-        wb = openpyxl.load_workbook(EXCEL_PATH)
-        ws = wb.active
-    else:
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.append(["fecha", "archivo_origen", "status", "sigla", "numero", "dv", "max_gross_kg", "tara_kg"])
-
-    for fila in filas:
-        ws.append([
-            fila.get("fecha", ""),
-            fila.get("archivo_origen", ""),
-            fila.get("status", ""),
-            fila.get("sigla", ""),
-            fila.get("numero", ""),
-            fila.get("dv", ""),
-            fila.get("max_gross_kg", ""),
-            fila.get("tara_kg", ""),
-        ])
-    
-    wb.save(EXCEL_PATH)
-
-# -------------------------------------------------------
 # MAIN
 # -------------------------------------------------------
-
 def main():
-    print("=== Iniciando procesamiento LOCAL ===")
+    print("=== Iniciando procesamiento a Google Sheets ===")
 
     procesadas = cargar_procesadas()
     todas_las_fotos = listar_fotos_locales()
@@ -133,8 +120,15 @@ def main():
         return
 
     print(f"Fotos nuevas encontradas: {len(fotos_nuevas)}")
+    
+    # Conectar a Google Sheets
+    hoja = conectar_sheets()
+    
+    # Si la hoja está vacía, poner encabezados
+    if len(hoja.get_all_values()) == 0:
+        hoja.append_row(["fecha", "archivo_origen", "status", "sigla", "numero", "dv", "max_gross_kg", "tara_kg"])
 
-    filas_nuevas   = []
+    filas_a_subir  = []
     nombres_ok     = set()
     procesadas_cnt = 0
     descartadas    = 0
@@ -149,7 +143,7 @@ def main():
 
             if not es_puerta_contenedor(img):
                 descartadas += 1
-                filas_nuevas.append({"fecha": datetime.now().strftime("%Y-%m-%d %H:%M"), "archivo_origen": nombre, "status": "Descartada"})
+                filas_a_subir.append([datetime.now().strftime("%Y-%m-%d %H:%M"), nombre, "Descartada", "", "", "", "", ""])
                 nombres_ok.add(nombre)
                 print(f"    → Descartada")
                 continue
@@ -158,11 +152,20 @@ def main():
 
             if datos:
                 procesadas_cnt += 1
-                filas_nuevas.append({"fecha": datetime.now().strftime("%Y-%m-%d %H:%M"), "archivo_origen": nombre, "status": "OK", **datos})
+                filas_a_subir.append([
+                    datetime.now().strftime("%Y-%m-%d %H:%M"), 
+                    nombre, 
+                    "OK", 
+                    datos.get('sigla',''), 
+                    datos.get('numero',''), 
+                    datos.get('dv',''), 
+                    datos.get('max_gross_kg',''), 
+                    datos.get('tara_kg','')
+                ])
                 print(f"    → OK: {datos.get('sigla','?')}{datos.get('numero','?')}")
             else:
                 errores += 1
-                filas_nuevas.append({"fecha": datetime.now().strftime("%Y-%m-%d %H:%M"), "archivo_origen": nombre, "status": "Error OCR"})
+                filas_a_subir.append([datetime.now().strftime("%Y-%m-%d %H:%M"), nombre, "Error OCR", "", "", "", "", ""])
                 print(f"    → Error OCR")
 
             nombres_ok.add(nombre)
@@ -170,12 +173,13 @@ def main():
         except Exception as e:
             errores += 1
             print(f"    → Error sistema: {e}")
-            filas_nuevas.append({"fecha": datetime.now().strftime("%Y-%m-%d %H:%M"), "archivo_origen": nombre, "status": f"Error: {e}"})
+            filas_a_subir.append([datetime.now().strftime("%Y-%m-%d %H:%M"), nombre, f"Error: {e}", "", "", "", "", ""])
             nombres_ok.add(nombre)
 
-    if filas_nuevas:
-        actualizar_excel_local(filas_nuevas)
-        print(f"Excel actualizado con {len(filas_nuevas)} filas nuevas.")
+    # Enviar datos a Google Sheets de una sola vez
+    if filas_a_subir:
+        hoja.append_rows(filas_a_subir)
+        print(f"Google Sheets actualizado con {len(filas_a_subir)} filas nuevas.")
 
     procesadas.update(nombres_ok)
     guardar_procesadas(procesadas)
