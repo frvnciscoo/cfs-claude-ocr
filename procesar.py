@@ -6,8 +6,7 @@ Procesador automático de contenedores
 - Registra qué fotos ya fueron procesadas (processed.json)
 """
 
-import anthropic
-import base64
+import google.generativeai as genai
 import io
 import json
 import os
@@ -16,24 +15,22 @@ import requests
 from datetime import datetime
 from PIL import Image
 
-
 # -------------------------------------------------------
 # CONFIGURACIÓN — variables de entorno (GitHub Secrets)
 # -------------------------------------------------------
-ANTHROPIC_KEY      = os.environ["ANTHROPIC_KEY"]
+GEMINI_KEY         = os.environ["GEMINI_KEY"]
 ONEDRIVE_TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 CLIENT_ID          = os.environ["MS_CLIENT_ID"]
 CLIENT_SECRET      = os.environ["MS_CLIENT_SECRET"]
 TENANT_ID          = os.environ["MS_TENANT_ID"]
 
-# Carpeta de OneDrive donde se suben las fotos (ej: "Contenedores/Fotos")
 CARPETA_FOTOS      = os.environ.get("CARPETA_FOTOS", "Contenedores/Fotos")
-# Ruta del Excel en OneDrive (ej: "Contenedores/reporte.xlsx")
 EXCEL_PATH         = os.environ.get("EXCEL_PATH", "Contenedores/reporte.xlsx")
-# Archivo local que registra fotos ya procesadas
 PROCESSED_FILE     = "processed.json"
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+# Configurar Gemini
+genai.configure(api_key=GEMINI_KEY)
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 
 # -------------------------------------------------------
@@ -122,22 +119,20 @@ def guardar_procesadas(procesadas: set):
 
 
 # -------------------------------------------------------
-# UTILIDADES DE IMAGEN
+# UTILIDADES DE IMAGEN Y JSON
 # -------------------------------------------------------
 
-def imagen_a_base64(image_bytes: bytes) -> str:
-    """Optimiza la imagen a máx 1024px y convierte a base64 JPEG"""
+def preparar_imagen(image_bytes: bytes) -> Image.Image:
+    """Abre los bytes descargados y los convierte en un objeto Image para Gemini, optimizando tamaño."""
     img = Image.open(io.BytesIO(image_bytes))
     if img.mode != "RGB":
         img = img.convert("RGB")
     if max(img.size) > 1024:
         img.thumbnail((1024, 1024), Image.LANCZOS)
-    buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=85)
-    return base64.standard_b64encode(buffer.getvalue()).decode("utf-8")
-
+    return img
 
 def limpiar_json(texto: str):
+    """Limpia la respuesta para obtener solo el JSON válido"""
     try:
         s = texto.strip()
         if "```json" in s:
@@ -148,24 +143,21 @@ def limpiar_json(texto: str):
     except Exception:
         return None
 
-
 # -------------------------------------------------------
-# PIPELINE IA (2 etapas)
+# PIPELINE IA (2 etapas con Gemini)
 # -------------------------------------------------------
 
-def es_puerta_contenedor(image_b64: str) -> bool:
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=5,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
-                {"type": "text",  "text": "Is this a photo of a shipping container door showing the container code/number? Answer only YES or NO."}
-            ],
-        }],
-    )
-    return response.content[0].text.strip().upper().startswith("YES")
+def es_puerta_contenedor(img: Image.Image) -> bool:
+    prompt = "Is this a photo of a shipping container door showing the container code/number? Answer only YES or NO."
+    response = model.generate_content([prompt, img])
+    return response.text.strip().upper().startswith("YES")
+
+def extraer_datos_contenedor(img: Image.Image):
+    prompt = """Actúa como OCR experto en logística. Extrae en JSON:
+- sigla, numero, dv, max_gross_kg, tara_kg
+Si no es legible pon null. Solo el JSON, sin explicaciones."""
+    response = model.generate_content([prompt, img])
+    return limpiar_json(response.text)
 
 
 def extraer_datos_contenedor(image_b64: str):
