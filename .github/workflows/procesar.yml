@@ -36,7 +36,7 @@ jobs:
 
       - name: Ejecutar procesamiento
         env:
-          ANTHROPIC_KEY:  ${{ secrets.ANTHROPIC_KEY }}
+          GEMINI_KEY:  ${{ secrets.GEMINI_KEY }}
           MS_CLIENT_ID:   ${{ secrets.MS_CLIENT_ID }}
           MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
           MS_TENANT_ID:   ${{ secrets.MS_TENANT_ID }}
