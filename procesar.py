@@ -1,7 +1,7 @@
 """
 Procesador automático de contenedores
 - Lee fotos nuevas desde OneDrive
-- Filtra con Claude (2 etapas)
+- Filtra con Gemini (2 etapas)
 - Actualiza el Excel en OneDrive
 - Registra qué fotos ya fueron procesadas (processed.json)
 """
@@ -10,7 +10,6 @@ import google.generativeai as genai
 import io
 import json
 import os
-import sys
 import requests
 from datetime import datetime
 from PIL import Image
@@ -160,23 +159,6 @@ Si no es legible pon null. Solo el JSON, sin explicaciones."""
     return limpiar_json(response.text)
 
 
-def extraer_datos_contenedor(image_b64: str):
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=200,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
-                {"type": "text",  "text": """Actúa como OCR experto en logística. Extrae en JSON:
-- sigla, numero, dv, max_gross_kg, tara_kg
-Si no es legible pon null. Solo el JSON, sin explicaciones."""}
-            ],
-        }],
-    )
-    return limpiar_json(response.content[0].text)
-
-
 # -------------------------------------------------------
 # ACTUALIZAR EXCEL
 # -------------------------------------------------------
@@ -244,10 +226,11 @@ def main():
 
         try:
             image_bytes = descargar_foto(foto["url"])
-            img  = preparar_imagen(image_bytes)
+            # AQUÍ EL CAMBIO PRINCIPAL: Usamos preparar_imagen en lugar de base64
+            img = preparar_imagen(image_bytes)
 
             # Etapa 1: filtro
-            if not es_puerta_contenedor(image_b64):
+            if not es_puerta_contenedor(img):
                 descartadas += 1
                 filas_nuevas.append({
                     "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -259,7 +242,7 @@ def main():
                 continue
 
             # Etapa 2: OCR
-            datos = extraer_datos_contenedor(image_b64)
+            datos = extraer_datos_contenedor(img)
 
             if datos:
                 procesadas_cnt += 1
