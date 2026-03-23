@@ -1,13 +1,10 @@
-name: Procesar Contenedores
+name: Procesar Contenedores (Prueba Local)
 
 on:
-  schedule:
-    # Ejecutar cada 4 horas (puedes cambiar el intervalo)
-    # Formato: minuto hora día mes día_semana
-    - cron: "0 */4 * * *"
+  workflow_dispatch: # Perfecto para ejecutarlo a mano cuando subas fotos
 
-  # Permite ejecutar manualmente desde GitHub si necesitas
-  workflow_dispatch:
+permissions:
+  contents: write # Necesario para guardar el Excel de vuelta en el repo
 
 jobs:
   procesar:
@@ -25,29 +22,15 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
-      # Restaurar el archivo de fotos ya procesadas (persistencia entre ejecuciones)
-      - name: Restaurar processed.json
-        uses: actions/cache@v4
-        with:
-          path: processed.json
-          key: processed-json-${{ github.run_id }}
-          restore-keys: |
-            processed-json-
-
       - name: Ejecutar procesamiento
         env:
-          GEMINI_KEY:  ${{ secrets.GEMINI_KEY }}
-          MS_CLIENT_ID:   ${{ secrets.MS_CLIENT_ID }}
-          MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
-          MS_TENANT_ID:   ${{ secrets.MS_TENANT_ID }}
-          CARPETA_FOTOS:  ${{ secrets.CARPETA_FOTOS }}
-          EXCEL_PATH:     ${{ secrets.EXCEL_PATH }}
+          GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
         run: python procesar.py
 
-      # Guardar processed.json actualizado para la próxima ejecución
-      - name: Guardar processed.json
-        uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: processed.json
-          key: processed-json-${{ github.run_id }}
+      - name: Guardar resultados en GitHub
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git add reporte.xlsx processed.json
+          # Comprueba si hay cambios antes de hacer commit
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Actualizar reporte de contenedores" && git push)
