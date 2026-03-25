@@ -8,6 +8,10 @@ on:
 jobs:
   procesar:
     runs-on: ubuntu-latest
+    
+    # Esto otorga permiso al bot de GitHub para escribir en tu repositorio
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repositorio
@@ -26,3 +30,12 @@ jobs:
           GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
         run: python procesar.py
+
+      - name: Guardar historial de procesados
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git add processed.json
+          # Comprueba si hay cambios; si los hay, hace el commit. Si no, no hace nada para evitar errores.
+          git diff --quiet && git diff --staged --quiet || git commit -m "Actualizar historial de contenedores procesados"
+          git push
