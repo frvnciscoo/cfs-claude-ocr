@@ -1,8 +1,9 @@
 """
-Procesador de contenedores -> Google Sheets
-- Lee fotos desde la carpeta local 'Fotos'
-- Filtra y extrae datos con Gemini 2.5 Flash
-- Escribe directamente en Google Sheets
+Procesador de contenedores -> Google Sheets (Versión Red Local / Self-Hosted)
+- Calcula automáticamente los días a buscar (Fines de semana o día anterior).
+- Lee fotos directamente desde la ruta de red sin descargarlas.
+- Filtra y extrae datos con Gemini 2.5 Flash.
+- Escribe directamente en Google Sheets.
 """
 
 import google.generativeai as genai
@@ -11,7 +12,8 @@ from google.oauth2.service_account import Credentials
 import io
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from PIL import Image
 
 # -------------------------------------------------------
@@ -20,7 +22,7 @@ from PIL import Image
 GEMINI_KEY      = os.environ["GEMINI_KEY"]
 GCP_CREDENTIALS = os.environ["GCP_CREDENTIALS"]
 
-CARPETA_FOTOS   = "Fotos"
+RUTA_SERVIDOR   = r"\\SvtiFileServer\Fotos Terminal\Consolidados"
 PROCESSED_FILE  = "processed.json"
 
 # Datos de tu Google Sheet
@@ -31,7 +33,63 @@ genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 # -------------------------------------------------------
-# CONEXIÓN A GOOGLE SHEETS
+# LÓGICA DE FECHAS Y NAVEGACIÓN EN RED
+# -------------------------------------------------------
+def obtener_fechas_objetivo():
+    """Retorna una lista de fechas (objetos date) según el día de la semana."""
+    hoy = datetime.now().date()
+    
+    if hoy.weekday() == 0:  # 0 corresponde a Lunes
+        print("Día detectado: Lunes. Buscando fotos de Viernes, Sábado y Domingo.")
+        return [hoy - timedelta(days=3), hoy - timedelta(days=2), hoy - timedelta(days=1)]
+    else:
+        print("Día normal. Buscando fotos del día de ayer.")
+        return [hoy - timedelta(days=1)]
+
+def buscar_fotos_en_red() -> list[dict]:
+    fechas_objetivo = obtener_fechas_objetivo()
+    # Formateamos las fechas a DD-MM-YYYY para buscar las carpetas
+    fechas_str = {f.strftime('%d-%m-%Y') for f in fechas_objetivo}
+    anios_str = {str(f.year) for f in fechas_objetivo}
+
+    base_dir = Path(RUTA_SERVIDOR)
+    fotos_encontradas = []
+
+    if not base_dir.exists():
+        print(f"❌ Error crítico: No se puede acceder a la ruta de red: {base_dir}")
+        print("Asegúrate de que el equipo (Self-Hosted Runner) tenga permisos y acceso a la red.")
+        return fotos_encontradas
+
+    extensiones = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+    # Navegamos Año -> Mes -> Día
+    for carpeta_anio in base_dir.iterdir():
+        if not carpeta_anio.is_dir() or carpeta_anio.name not in anios_str: 
+            continue
+
+        for carpeta_mes in carpeta_anio.iterdir():
+            if not carpeta_mes.is_dir(): 
+                continue
+
+            for carpeta_dia in carpeta_mes.iterdir():
+                if not carpeta_dia.is_dir(): 
+                    continue
+
+                # Si el nombre de la carpeta coincide con alguna fecha que buscamos
+                if carpeta_dia.name in fechas_str:
+                    print(f"  📂 Escaneando directorio: {carpeta_dia.name}")
+                    for archivo in carpeta_dia.rglob('*'):
+                        if archivo.is_file() and archivo.suffix.lower() in extensiones:
+                            fotos_encontradas.append({
+                                "nombre": archivo.name,
+                                "ruta": str(archivo),       # La ruta absoluta para que PIL la abra
+                                "id_unico": str(archivo)    # Usaremos la ruta entera como ID en processed.json
+                            })
+                            
+    return fotos_encontradas
+
+# -------------------------------------------------------
+# CONEXIÓN A GOOGLE SHEETS E HISTORIAL
 # -------------------------------------------------------
 def conectar_sheets():
     scopes = [
@@ -42,20 +100,6 @@ def conectar_sheets():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     cliente = gspread.authorize(creds)
     return cliente.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
-
-# -------------------------------------------------------
-# OPERACIONES LOCALES (Lectura de fotos)
-# -------------------------------------------------------
-def listar_fotos_locales() -> list[dict]:
-    if not os.path.exists(CARPETA_FOTOS):
-        os.makedirs(CARPETA_FOTOS)
-        return []
-    extensiones = {".jpg", ".jpeg", ".png", ".webp"}
-    return [
-        {"nombre": f, "ruta": os.path.join(CARPETA_FOTOS, f)}
-        for f in os.listdir(CARPETA_FOTOS)
-        if any(f.lower().endswith(ext) for ext in extensiones)
-    ]
 
 def cargar_procesadas() -> set:
     if os.path.exists(PROCESSED_FILE):
@@ -112,30 +156,31 @@ def main():
     print("=== Iniciando procesamiento a Google Sheets ===")
 
     procesadas = cargar_procesadas()
-    todas_las_fotos = listar_fotos_locales()
-    fotos_nuevas = [f for f in todas_las_fotos if f["nombre"] not in procesadas]
+    todas_las_fotos = buscar_fotos_en_red()
+    
+    # Filtramos usando id_unico (la ruta completa) para no repetir
+    fotos_nuevas = [f for f in todas_las_fotos if f["id_unico"] not in procesadas]
 
     if not fotos_nuevas:
-        print("No hay fotos nuevas en la carpeta 'Fotos'. Fin.")
+        print("No hay fotos nuevas pendientes de procesar para las fechas objetivo. Fin.")
         return
 
     print(f"Fotos nuevas encontradas: {len(fotos_nuevas)}")
     
-    # Conectar a Google Sheets
     hoja = conectar_sheets()
     
-    # Si la hoja está vacía, poner encabezados
     if len(hoja.get_all_values()) == 0:
         hoja.append_row(["fecha", "archivo_origen", "status", "sigla", "numero", "dv", "max_gross_kg", "tara_kg"])
 
     filas_a_subir  = []
-    nombres_ok     = set()
+    ids_ok         = set()
     procesadas_cnt = 0
     descartadas    = 0
     errores        = 0
 
     for foto in fotos_nuevas:
         nombre = foto["nombre"]
+        id_unico = foto["id_unico"]
         print(f"  Procesando: {nombre}")
 
         try:
@@ -144,7 +189,7 @@ def main():
             if not es_puerta_contenedor(img):
                 descartadas += 1
                 filas_a_subir.append([datetime.now().strftime("%Y-%m-%d %H:%M"), nombre, "Descartada", "", "", "", "", ""])
-                nombres_ok.add(nombre)
+                ids_ok.add(id_unico)
                 print(f"    → Descartada")
                 continue
 
@@ -168,20 +213,19 @@ def main():
                 filas_a_subir.append([datetime.now().strftime("%Y-%m-%d %H:%M"), nombre, "Error OCR", "", "", "", "", ""])
                 print(f"    → Error OCR")
 
-            nombres_ok.add(nombre)
+            ids_ok.add(id_unico)
 
         except Exception as e:
             errores += 1
             print(f"    → Error sistema: {e}")
             filas_a_subir.append([datetime.now().strftime("%Y-%m-%d %H:%M"), nombre, f"Error: {e}", "", "", "", "", ""])
-            nombres_ok.add(nombre)
+            ids_ok.add(id_unico)
 
-    # Enviar datos a Google Sheets de una sola vez
     if filas_a_subir:
         hoja.append_rows(filas_a_subir)
         print(f"Google Sheets actualizado con {len(filas_a_subir)} filas nuevas.")
 
-    procesadas.update(nombres_ok)
+    procesadas.update(ids_ok)
     guardar_procesadas(procesadas)
 
     print(f"\n=== Resumen ===")
